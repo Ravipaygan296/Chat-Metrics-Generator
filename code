@@ -1,0 +1,187 @@
+# --- 1. Import libraries ---
+import streamlit as st
+import pandas as pd
+import numpy as np
+from datetime import datetime, time
+from io import BytesIO
+import altair as alt
+
+# --- 2. Helper Functions ---
+
+# Convert agent response time to seconds
+def time_to_seconds(series):
+    def convert(x):
+        if pd.isnull(x):
+            return None
+        if isinstance(x, time):
+            return x.hour * 3600 + x.minute * 60 + x.second
+        if isinstance(x, str):
+            try:
+                parts = x.split(":")
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            except:
+                return None
+        return None
+    return series.apply(convert)
+
+# Chat Metrics
+def get_chat_metrics(df):
+    df['Week'] = df['ChatStartTime'].dt.to_period('W').apply(lambda r: r.start_time)
+    metrics = []
+    for week, group in df.groupby('Week'):
+        incoming_chats = group['RoomCode'].nunique()
+        unique_users = group['UserId'].nunique()
+        closed_by_bot = group[group['ClosedBy'] == 'System'].shape[0]
+        closed_by_agents = group[group['ClosedBy'] != 'System'].shape[0]
+        bot_deflection = closed_by_bot / incoming_chats if incoming_chats else 0
+        metrics.append({
+            'Week': week.strftime('%Y-%m-%d'),
+            'Incoming Chats': incoming_chats,
+            'Unique Users': unique_users,
+            'Closed By Bot': closed_by_bot,
+            'Bot Deflection %': round(bot_deflection * 100, 2),
+            'Closed By Agents': closed_by_agents
+        })
+    total_incoming = df['RoomCode'].nunique()
+    total_users = df['UserId'].nunique()
+    total_bot = df[df['ClosedBy'] == 'System'].shape[0]
+    total_agents = df[df['ClosedBy'] != 'System'].shape[0]
+    total_deflection = total_bot / total_incoming if total_incoming else 0
+    overall = {
+        'Week': 'Overall',
+        'Incoming Chats': total_incoming,
+        'Unique Users': total_users,
+        'Closed By Bot': total_bot,
+        'Bot Deflection %': round(total_deflection * 100, 2),
+        'Closed By Agents': total_agents
+    }
+    return pd.DataFrame([overall] + metrics)
+
+# Agent Metrics
+def get_agent_metrics(df):
+    agent_df = df[~df['ClosedBy'].isin(['Bot', 'System'])]
+    metrics = []
+    for week, week_group in agent_df.groupby('Week'):
+        for agent in agent_df['ClosedBy'].unique():
+            agent_data = week_group[week_group['ClosedBy'] == agent]
+            if agent_data.empty:
+                continue
+            chats_resolved = agent_data.shape[0]
+            avg_response = agent_data['AgentFirstResponseTime_sec'].mean()
+            resolution_times = (agent_data['ChatEndTime'] - agent_data['ChatStartTime']).mean()
+            csat_avg = agent_data['CsatScore'].mean()
+
+            bh_start = time(10, 0)
+            bh_end = time(17, 0)
+            bh_data = agent_data[agent_data['ChatStartTime'].dt.time.between(bh_start, bh_end)]
+            obh_data = agent_data[~agent_data['ChatStartTime'].dt.time.between(bh_start, bh_end)]
+
+            csat_bh = bh_data['CsatScore'].mean()
+            csat_obh = obh_data['CsatScore'].mean()
+
+            metrics.append({
+                'Week': week.strftime('%Y-%m-%d'),
+                'Agent Name': agent,
+                'Chats Resolved': chats_resolved,
+                'Avg First Response Time (s)': round(avg_response, 2),
+                'Avg Chat Resolution Time': resolution_times,
+                'Avg CSAT': round(csat_avg, 2),
+                'Avg CSAT (10AM–5PM)': round(csat_bh, 2),
+                'Avg CSAT (Outside 10AM–5PM)': round(csat_obh, 2)
+            })
+    return pd.DataFrame(metrics)
+
+# Incoming chats by Half Hour
+def incoming_chats_half_hour(df):
+    df['HalfHourSlot'] = df['ChatStartTime'].dt.floor('30min')
+    half_hour_counts = df.groupby('HalfHourSlot')['RoomCode'].nunique().reset_index()
+    half_hour_counts.rename(columns={'RoomCode': 'Incoming Chats'}, inplace=True)
+    return half_hour_counts
+
+# Agent daily metrics
+def agent_daily_metrics(df):
+    agent_df = df[~df['ClosedBy'].isin(['Bot', 'System'])]
+    agent_df['Date'] = agent_df['ChatStartTime'].dt.date
+    metrics = []
+    for (agent, date), group in agent_df.groupby(['ClosedBy', 'Date']):
+        group = group.sort_values('ChatStartTime')
+        cumulative_time = (group['ChatEndTime'] - group['ChatStartTime']).sum()
+        active_time = group['ChatEndTime'].max() - group['ChatStartTime'].min()
+        free_time = active_time - cumulative_time
+        metrics.append({
+            'Agent': agent,
+            'Date': date,
+            'Active Time': str(active_time),
+            'Cumulative Chat Time': str(cumulative_time),
+            'Free Time': str(free_time)
+        })
+    return pd.DataFrame(metrics)
+
+# --- 3. Streamlit App ---
+
+st.set_page_config(page_title="Chat Metrics Report Generator", layout="wide")
+st.title("Data Analyst Intern - Chat Metrics Report Generator")
+
+# Background Styling
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background-image: linear-gradient(120deg, #89f7fe 0%, #66a6ff 100%);
+        background-size: cover;
+        animation: gradient 5s ease infinite;
+    }
+    @keyframes gradient {
+        0% {background-position: 0% 50%;}
+        50% {background-position: 100% 50%;}
+        100% {background-position: 0% 50%;}
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.write("Upload your Data Dump Excel file below:")
+
+uploaded_file = st.file_uploader("Choose an Excel file", type=["xlsx"])
+
+if uploaded_file:
+    df = pd.read_excel(uploaded_file)
+
+    df['ChatStartTime'] = pd.to_datetime(df['ChatStartTime'], errors='coerce')
+    df['ChatEndTime'] = pd.to_datetime(df['ChatEndTime'], errors='coerce')
+    df['AgentFirstResponseTime_sec'] = time_to_seconds(df['AgentFirstResponseTime'])
+
+    chat_metrics = get_chat_metrics(df)
+    agent_metrics = get_agent_metrics(df)
+    half_hour_data = incoming_chats_half_hour(df)
+    agent_metrics_daily = agent_daily_metrics(df)
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        chat_metrics.to_excel(writer, index=False, sheet_name='Chat Metrics')
+        agent_metrics.to_excel(writer, index=False, sheet_name='Agent Metrics')
+        half_hour_data.to_excel(writer, index=False, sheet_name='Incoming Half Hour')
+        agent_metrics_daily.to_excel(writer, index=False, sheet_name='Agent Daily Metrics')
+    output.seek(0)
+
+    st.success("✅ Processing Done! Click below to download the report.")
+    st.download_button(
+        label="Download Report",
+        data=output,
+        file_name="Chat_Metrics_Report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    st.subheader("📈 Incoming Chats by Half Hour")
+    st.altair_chart(
+        alt.Chart(half_hour_data).mark_line(point=True).encode(
+            x='HalfHourSlot:T',
+            y='Incoming Chats:Q'
+        ).properties(title='Incoming Chats Distribution')
+    )
+
+# Footer
+st.markdown("---")
+st.markdown("**Developed by:** Ravi Payghan  \n**Contact:** payghanravi362@gmail.com")
+

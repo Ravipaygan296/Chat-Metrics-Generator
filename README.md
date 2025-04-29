@@ -12,6 +12,17 @@ This is a **Streamlit-based web application** that processes and analyzes chat d
 - Export the analyzed data as a downloadable Excel report
 - Simple, clean interface using Streamlit
 
+## How to Run
+
+1. Install requirements:
+   pip install -r requirements.txt
+
+2. Run app:
+   streamlit run app.py
+
+Developed by: Ravi Payghan
+Contact: payghanravi362@gmail.com
+
 ## 📦 Installation
 
 Make sure you have Python 3.7 or higher installed.
